@@ -85,7 +85,7 @@ jobs:
     name: Build Image with Jib & Push to ECR
     if: ${{ github.event_name == 'push' }}
     needs: build-and-test
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
 
