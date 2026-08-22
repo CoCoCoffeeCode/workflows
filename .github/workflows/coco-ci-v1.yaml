@@ -31,7 +31,7 @@ on:
         type: string
     secrets:
       GITOPS_REPO_TOKEN:
-        required: true   # PAT/deploy key có quyền write vào repo gitops-manifests
+        required: false   # PAT/deploy key có quyền write vào repo gitops-manifests
 
 env:
   AWS_ENDPOINT_URL: http://floci:4566   # tên container Floci đang chạy sẵn
