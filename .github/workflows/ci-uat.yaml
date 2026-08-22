@@ -1,16 +1,14 @@
 # =====================================================================================
-# fsap-microservice-ci-v1.yaml  (DỰ ĐOÁN / RECONSTRUCTION)
-# Reusable workflow chuẩn cho microservice Java/Gradle build bằng Jib, push ECR,
-# publish OpenAPI, deploy có approval gate qua Slack.
+# fsap-microservice-ci-v1.yaml  (DỰ ĐOÁN / RECONSTRUCTION - phiên bản đã tối ưu)
+# Reusable workflow tối giản cho microservice Java/Gradle:
+#   1. Build & Unit Test
+#   2. Build image bằng Jib & push lên ECR
+#   3. Cập nhật image tag vào gitops-manifests (GitOps repo) để ArgoCD tự sync
 #
-# LƯU Ý: Đây KHÔNG phải file gốc thật của bạn. Đây là bản dựng lại dựa trên các input
-# mà workflow "CI for SIT env" của bạn đã truyền vào (registry, image_name, owner,
-# approver_slack_uid, build_with_jib, environment, runner, publish_openapi,
-# openapi_gradle_task, openapi_file_path, validate_openapi_on_pr).
-# Dùng để tham khảo / đối chiếu logic, không nên coi là chính xác 100%.
+# LƯU Ý: bản dựng lại dựa trên các input mà workflow gọi vào, không phải file gốc.
 # =====================================================================================
 
-name: CoCo Microservice CI v1
+name: COCO Microservice CI v1
 
 on:
   workflow_call:
@@ -24,9 +22,6 @@ on:
       owner:
         required: true
         type: string
-      approver_slack_uid:
-        required: false
-        type: string
       build_with_jib:
         required: false
         type: boolean
@@ -34,38 +29,16 @@ on:
       environment:
         required: true
         type: string
-      runner:
-        required: true
-        type: string
-      publish_openapi:
-        required: false
-        type: boolean
-        default: false
-      openapi_gradle_task:
-        required: false
-        type: string
-      openapi_file_path:
-        required: false
-        type: string
-      validate_openapi_on_pr:
-        required: false
-        type: boolean
-        default: false
     secrets:
-      AWS_ACCESS_KEY_ID:
-        required: false
-      AWS_SECRET_ACCESS_KEY:
-        required: false
-      SLACK_BOT_TOKEN:
-        required: false
-      SONAR_TOKEN:
-        required: false
       GITOPS_REPO_TOKEN:
         required: false   # PAT/deploy key có quyền write vào repo gitops-manifests
-      ARGOCD_AUTH_TOKEN:
-        required: false
 
 env:
+  AWS_ENDPOINT_URL: http://floci:4566   # tên container Floci đang chạy sẵn
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+
   IMAGE_TAG: ${{ github.sha }}
   ECR_REPO_URI: ${{ inputs.registry }}/${{ inputs.image_name }}
 
@@ -76,16 +49,10 @@ jobs:
   # ---------------------------------------------------------------------------------
   build-and-test:
     name: Build & Unit Test
-    runs-on: ${{ inputs.runner }}
-    outputs:
-      short_sha: ${{ steps.vars.outputs.short_sha }}
+    runs-on: self-hosted
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
-
-      - name: Set short SHA
-        id: vars
-        run: echo "short_sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Setup JDK
         uses: actions/setup-java@v4
@@ -112,188 +79,63 @@ jobs:
           path: "**/build/test-results/test/*.xml"
 
   # ---------------------------------------------------------------------------------
-  # 2. STATIC ANALYSIS / SECURITY SCAN (SonarQube, dependency check...)
-  # ---------------------------------------------------------------------------------
-  code-quality:
-    name: Code Quality & Security Scan
-    needs: build-and-test
-    runs-on: ${{ inputs.runner }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: SonarQube analysis
-        run: ./gradlew sonar --no-daemon
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-
-      - name: Dependency vulnerability scan
-        run: ./gradlew dependencyCheckAnalyze --no-daemon
-
-  # ---------------------------------------------------------------------------------
-  # 3. VALIDATE OPENAPI SPEC (chỉ chạy khi là Pull Request)
-  # ---------------------------------------------------------------------------------
-  validate-openapi:
-    name: Validate OpenAPI Spec
-    if: ${{ inputs.validate_openapi_on_pr && github.event_name == 'pull_request' }}
-    needs: build-and-test
-    runs-on: ${{ inputs.runner }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Generate OpenAPI doc
-        run: ./gradlew ${{ inputs.openapi_gradle_task }} --no-daemon
-
-      - name: Breaking-change / lint check
-        run: |
-          npx @redocly/cli lint ${{ inputs.openapi_file_path }}
-          # so sánh với version hiện có trên registry để phát hiện breaking change
-          npx openapi-diff main-spec.yaml ${{ inputs.openapi_file_path }} --fail-on-incompatible
-
-  # ---------------------------------------------------------------------------------
-  # 4. BUILD IMAGE (Jib) & PUSH LÊN ECR — chỉ chạy khi push vào main
+  # 2. BUILD IMAGE (Jib) & PUSH LÊN ECR — chỉ chạy khi push vào main
   # ---------------------------------------------------------------------------------
   build-and-push-image:
     name: Build Image with Jib & Push to ECR
     if: ${{ github.event_name == 'push' }}
-    needs: [build-and-test, code-quality]
-    runs-on: ${{ inputs.runner }}
+    needs: build-and-test
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Setup JDK
+        uses: actions/setup-java@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ap-southeast-1
+          distribution: temurin
+          java-version: "25"
 
-      - name: Login to Amazon ECR
-        id: ecr-login
-        uses: aws-actions/amazon-ecr-login@v2
+      - name: Login vào Floci ECR
+        run: |
+          aws ecr get-login-password | docker login --username AWS --password-stdin \
+          ${{ inputs.registry }}
 
       - name: Build & Push image via Jib
-        if: ${{ inputs.build_with_jib }}
         run: |
           ./gradlew jib \
             -Djib.to.image=${{ env.ECR_REPO_URI }}:${{ env.IMAGE_TAG }} \
-            -Djib.to.tags=latest,sit \
+            -Djib.allowInsecureRegistries=true \
             --no-daemon
 
-      - name: Fallback - Build & Push via Dockerfile
-        if: ${{ !inputs.build_with_jib }}
-        run: |
-          docker build -t ${{ env.ECR_REPO_URI }}:${{ env.IMAGE_TAG }} .
-          docker push ${{ env.ECR_REPO_URI }}:${{ env.IMAGE_TAG }}
-
-  # ---------------------------------------------------------------------------------
-  # 5. PUBLISH OPENAPI SPEC (sau khi build image thành công)
-  # ---------------------------------------------------------------------------------
-  publish-openapi:
-    name: Publish OpenAPI Spec
-    if: ${{ inputs.publish_openapi && github.event_name == 'push' }}
-    needs: build-and-push-image
-    runs-on: ${{ inputs.runner }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Generate OpenAPI doc
-        run: ./gradlew ${{ inputs.openapi_gradle_task }} --no-daemon
-
-      - name: Publish spec to internal API portal / gateway
-        run: |
-          curl -X POST "$API_PORTAL_URL/services/${{ inputs.image_name }}/spec" \
-            -H "Authorization: Bearer $API_PORTAL_TOKEN" \
-            -F "spec=@${{ inputs.openapi_file_path }}"
-
-  # ---------------------------------------------------------------------------------
-  # 6. MANUAL APPROVAL (thông báo qua Slack tới người approve trước khi deploy SIT)
-  # ---------------------------------------------------------------------------------
-  request-approval:
-    name: Request Deployment Approval
-    if: ${{ github.event_name == 'push' }}
-    needs: build-and-push-image
-    runs-on: ${{ inputs.runner }}
-    environment: ${{ inputs.environment }}   # dùng GitHub Environment protection rule để gate
-    steps:
-      - name: Notify approver on Slack
-        run: |
-          curl -X POST -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-            -H "Content-type: application/json" \
-            --data '{
-              "channel": "${{ inputs.approver_slack_uid }}",
-              "text": "🚀 *${{ inputs.image_name }}* (owner: ${{ inputs.owner }}) đang chờ approve để deploy lên *${{ inputs.environment }}*. Commit: ${{ github.sha }}"
-            }' \
-            https://slack.com/api/chat.postMessage
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-      # Việc "chờ approve" thực chất do GitHub Environment protection rule
-      # (Required reviewers) trên environment `sit` xử lý — job deploy phía dưới
-      # sẽ tự động bị pause cho tới khi approver_slack_uid (hoặc nhóm reviewer
-      # tương ứng) approve trên GitHub UI.
-
-  # ---------------------------------------------------------------------------------
-  # 7. DEPLOY LÊN MÔI TRƯỜNG SIT — GitOps qua ArgoCD trên EKS
-  #    CI KHÔNG tự deploy trực tiếp (không gọi `helm upgrade` / `kubectl apply`).
-  #    CI chỉ cập nhật image tag trong Helm values (nằm ở git repo riêng - thường
-  #    gọi là "gitops repo" / "config repo"), commit + push. ArgoCD (đang watch
-  #    repo đó) sẽ tự phát hiện thay đổi và tự đồng bộ (sync) vào cluster EKS.
-  # ---------------------------------------------------------------------------------
-  update-gitops-manifest:
-    name: Update Helm values (GitOps repo) for ${{ inputs.environment }}
-    if: ${{ github.event_name == 'push' }}
-    needs: request-approval
-    runs-on: ${{ inputs.runner }}
-    environment: ${{ inputs.environment }}
-    steps:
-      - name: Checkout GitOps repo (chứa Helm chart / values)
-        uses: actions/checkout@v4
-        with:
-          repository: GalaxyFinX/gitops-manifests   # repo riêng lưu Helm chart + values, tách khỏi source code
-          token: ${{ secrets.GITOPS_REPO_TOKEN }}    # PAT/deploy key có quyền write vào gitops repo
-          path: gitops
-
-      - name: Bump image tag trong values file
-        working-directory: gitops
-        run: |
-          # ví dụ cấu trúc: apps/${image_name}/${environment}/values.yaml
-          VALUES_FILE="apps/${{ inputs.image_name }}/${{ inputs.environment }}/values.yaml"
-          yq -i '.image.repository = "${{ env.ECR_REPO_URI }}"' "$VALUES_FILE"
-          yq -i '.image.tag = "${{ env.IMAGE_TAG }}"' "$VALUES_FILE"
-
-      - name: Commit & push thay đổi
-        working-directory: gitops
-        run: |
-          git config user.name "fsap-ci-bot"
-          git config user.email "ci-bot@galaxyfinx.internal"
-          git add "apps/${{ inputs.image_name }}/${{ inputs.environment }}/values.yaml"
-          git commit -m "chore(${{ inputs.image_name }}): deploy ${{ env.IMAGE_TAG }} to ${{ inputs.environment }}"
-          git push origin main
-
-      - name: Trigger ArgoCD sync (không chờ auto-sync poll)
-        run: |
-          argocd app sync ${{ inputs.image_name }}-${{ inputs.environment }} \
-            --server "$ARGOCD_SERVER" \
-            --auth-token "$ARGOCD_AUTH_TOKEN" \
-            --grpc-web
-
-      - name: Chờ ArgoCD app healthy & synced
-        run: |
-          argocd app wait ${{ inputs.image_name }}-${{ inputs.environment }} \
-            --server "$ARGOCD_SERVER" \
-            --auth-token "$ARGOCD_AUTH_TOKEN" \
-            --health --sync --timeout 300
-
-      - name: Notify deployment result on Slack
-        if: always()
-        run: |
-          curl -X POST -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-            -H "Content-type: application/json" \
-            --data '{
-              "channel": "${{ inputs.approver_slack_uid }}",
-              "text": "✅ ArgoCD đã sync *${{ inputs.image_name }}* (${{ env.IMAGE_TAG }}) lên *${{ inputs.environment }}* (status: ${{ job.status }})"
-            }' \
-            https://slack.com/api/chat.postMessage
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+#  # ---------------------------------------------------------------------------------
+#  # 3. CẬP NHẬT GITOPS-MANIFESTS (ArgoCD tự phát hiện & sync vào EKS)
+#  # ---------------------------------------------------------------------------------
+#  update-gitops-manifest:
+#    name: Update Helm values (GitOps repo) for ${{ inputs.environment }}
+#    if: ${{ github.event_name == 'push' }}
+#    needs: build-and-push-image
+#    runs-on: ubuntu-latest
+#    steps:
+#      - name: Checkout GitOps repo (chứa Helm chart / values)
+#        uses: actions/checkout@v4
+#        with:
+#          repository: GalaxyFinX/gitops-manifests
+#          token: ${{ secrets.GITOPS_REPO_TOKEN }}
+#          path: gitops
+#
+#      - name: Bump image tag trong values file
+#        working-directory: gitops
+#        run: |
+#          VALUES_FILE="apps/${{ inputs.image_name }}/${{ inputs.environment }}/values.yaml"
+#          yq -i '.image.repository = "${{ env.ECR_REPO_URI }}"' "$VALUES_FILE"
+#          yq -i '.image.tag = "${{ env.IMAGE_TAG }}"' "$VALUES_FILE"
+#
+#      - name: Commit & push thay đổi
+#        working-directory: gitops
+#        run: |
+#          VALUES_FILE="apps/${{ inputs.image_name }}/${{ inputs.environment }}/values.yaml"
+#          git config user.name "fsap-ci-bot"
+#          git config user.email "ci-bot@galaxyfinx.internal"
+#          git add "$VALUES_FILE"
+#          git commit -m "chore(${{ inputs.image_name }}): deploy ${{ env.IMAGE_TAG }} to ${{ inputs.environment }}"
+#          git push origin main
