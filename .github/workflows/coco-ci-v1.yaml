@@ -1,0 +1,145 @@
+# =====================================================================================
+# fsap-microservice-ci-v1.yaml  (DỰ ĐOÁN / RECONSTRUCTION - phiên bản đã tối ưu)
+# Reusable workflow tối giản cho microservice Java/Gradle:
+#   1. Build & Unit Test
+#   2. Build image bằng Jib & push lên ECR
+#   3. Cập nhật image tag vào gitops-manifests (GitOps repo) để ArgoCD tự sync
+#
+# LƯU Ý: bản dựng lại dựa trên các input mà workflow gọi vào, không phải file gốc.
+# =====================================================================================
+
+name: COCO Microservice CI v1
+
+on:
+  workflow_call:
+    inputs:
+      registry:
+        required: true
+        type: string
+      image_name:
+        required: true
+        type: string
+      owner:
+        required: true
+        type: string
+      build_with_jib:
+        required: false
+        type: boolean
+        default: true
+      environment:
+        required: true
+        type: string
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      GITOPS_REPO_TOKEN:
+        required: true   # PAT/deploy key có quyền write vào repo gitops-manifests
+
+env:
+  IMAGE_TAG: ${{ github.sha }}
+  ECR_REPO_URI: ${{ inputs.registry }}/${{ inputs.image_name }}
+
+jobs:
+
+  # ---------------------------------------------------------------------------------
+  # 1. BUILD & UNIT TEST
+  # ---------------------------------------------------------------------------------
+  build-and-test:
+    name: Build & Unit Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+
+      - name: Run unit tests
+        run: ./gradlew test --no-daemon
+
+      - name: Publish test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: "**/build/test-results/test/*.xml"
+
+  # ---------------------------------------------------------------------------------
+  # 2. BUILD IMAGE (Jib) & PUSH LÊN ECR — chỉ chạy khi push vào main
+  # ---------------------------------------------------------------------------------
+  build-and-push-image:
+    name: Build Image with Jib & Push to ECR
+    if: ${{ github.event_name == 'push' }}
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-southeast-1
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & Push image via Jib
+        run: |
+          ./gradlew jib \
+            -Djib.to.image=${{ env.ECR_REPO_URI }}:${{ env.IMAGE_TAG }} \
+            -Djib.to.tags=latest \
+            --no-daemon
+
+  # ---------------------------------------------------------------------------------
+  # 3. CẬP NHẬT GITOPS-MANIFESTS (ArgoCD tự phát hiện & sync vào EKS)
+  # ---------------------------------------------------------------------------------
+  update-gitops-manifest:
+    name: Update Helm values (GitOps repo) for ${{ inputs.environment }}
+    if: ${{ github.event_name == 'push' }}
+    needs: build-and-push-image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout GitOps repo (chứa Helm chart / values)
+        uses: actions/checkout@v4
+        with:
+          repository: GalaxyFinX/gitops-manifests
+          token: ${{ secrets.GITOPS_REPO_TOKEN }}
+          path: gitops
+
+      - name: Bump image tag trong values file
+        working-directory: gitops
+        run: |
+          VALUES_FILE="apps/${{ inputs.image_name }}/${{ inputs.environment }}/values.yaml"
+          yq -i '.image.repository = "${{ env.ECR_REPO_URI }}"' "$VALUES_FILE"
+          yq -i '.image.tag = "${{ env.IMAGE_TAG }}"' "$VALUES_FILE"
+
+      - name: Commit & push thay đổi
+        working-directory: gitops
+        run: |
+          VALUES_FILE="apps/${{ inputs.image_name }}/${{ inputs.environment }}/values.yaml"
+          git config user.name "fsap-ci-bot"
+          git config user.email "ci-bot@galaxyfinx.internal"
+          git add "$VALUES_FILE"
+          git commit -m "chore(${{ inputs.image_name }}): deploy ${{ env.IMAGE_TAG }} to ${{ inputs.environment }}"
+          git push origin main
