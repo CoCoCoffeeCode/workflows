@@ -34,7 +34,7 @@ on:
         required: false   # PAT/deploy key có quyền write vào repo gitops-manifests
 
 env:
-  AWS_ENDPOINT_URL: http://floci:4566   # tên container Floci đang chạy sẵn
+  AWS_ENDPOINT_URL: http://localhost:4566   # tên container Floci đang chạy sẵn
   AWS_DEFAULT_REGION: us-east-1
   AWS_ACCESS_KEY_ID: test
   AWS_SECRET_ACCESS_KEY: test
