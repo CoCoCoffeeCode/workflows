@@ -107,35 +107,52 @@ jobs:
             -Djib.allowInsecureRegistries=true \
             --no-daemon
 
-#  # ---------------------------------------------------------------------------------
-#  # 3. CẬP NHẬT GITOPS-MANIFESTS (ArgoCD tự phát hiện & sync vào EKS)
-#  # ---------------------------------------------------------------------------------
-#  update-gitops-manifest:
-#    name: Update Helm values (GitOps repo) for ${{ inputs.environment }}
-#    if: ${{ github.event_name == 'push' }}
-#    needs: build-and-push-image
-#    runs-on: ubuntu-latest
-#    steps:
-#      - name: Checkout GitOps repo (chứa Helm chart / values)
-#        uses: actions/checkout@v4
-#        with:
-#          repository: GalaxyFinX/gitops-manifests
-#          token: ${{ secrets.GITOPS_REPO_TOKEN }}
-#          path: gitops
-#
-#      - name: Bump image tag trong values file
-#        working-directory: gitops
-#        run: |
-#          VALUES_FILE="apps/${{ inputs.image_name }}/${{ inputs.environment }}/values.yaml"
-#          yq -i '.image.repository = "${{ env.ECR_REPO_URI }}"' "$VALUES_FILE"
-#          yq -i '.image.tag = "${{ env.IMAGE_TAG }}"' "$VALUES_FILE"
-#
-#      - name: Commit & push thay đổi
-#        working-directory: gitops
-#        run: |
-#          VALUES_FILE="apps/${{ inputs.image_name }}/${{ inputs.environment }}/values.yaml"
-#          git config user.name "fsap-ci-bot"
-#          git config user.email "ci-bot@galaxyfinx.internal"
-#          git add "$VALUES_FILE"
-#          git commit -m "chore(${{ inputs.image_name }}): deploy ${{ env.IMAGE_TAG }} to ${{ inputs.environment }}"
-#          git push origin main
+  # ---------------------------------------------------------------------------------
+  # 3. CẬP NHẬT GITOPS-MANIFESTS (ArgoCD tự phát hiện & sync vào EKS)
+  # ---------------------------------------------------------------------------------
+  update-gitops-manifest:
+    name: Update Helm values (GitOps repo) for ${{ inputs.environment }}
+    if: ${{ github.event_name == 'push' }}
+    needs: build-and-push-image
+    runs-on: self-hosted
+    steps:
+      - name: Checkout GitOps repo (chứa Helm chart / values)
+        uses: actions/checkout@v4
+        with:
+          repository: CoCoCoffeeCode/gitops-manifests
+          token: ${{ secrets.GITOPS_REPO_TOKEN }}
+          path: gitops
+
+      - name: Install yq
+        run: sudo snap install yq  # hoặc dùng mikefarah/yq-action nếu runner không có snap
+
+      - name: Bump image tag + push với retry
+        working-directory: gitops
+        run: |
+          VALUES_FILE="apps/${{ inputs.image_name }}/${{ inputs.environment }}/values.yaml"
+          git config user.name "coco-ci-bot"
+          git config user.email "ci-bot@coco.vn"
+          
+          push_success=false
+          for i in 1 2 3 4 5; do
+            yq -i '.image.repository = "'"${{ env.ECR_REPO_URI }}"'"' "$VALUES_FILE"
+            yq -i '.image.tag = "'"${{ env.IMAGE_TAG }}"'"' "$VALUES_FILE"
+            git add "$VALUES_FILE"
+            git commit -m "chore(${{ inputs.image_name }}): deploy ${{ env.IMAGE_TAG }} to ${{ inputs.environment }}" || echo "Không có thay đổi để commit, bỏ qua"
+
+            if git push origin main; then
+              echo "Push thành công"
+              push_success=true
+              break
+            fi
+
+            echo "Push bị reject (có commit khác chen vào) — pull rebase và thử lại (lần $i)"
+            git fetch origin main
+            git reset --hard origin/main
+            sleep $((RANDOM % 5 + 1))
+          done
+          
+          if [ "$push_success" = false ]; then
+            echo "::error::Push vào gitops-manifests thất bại sau 5 lần thử"
+            exit 1
+          fi
