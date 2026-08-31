@@ -124,7 +124,7 @@ jobs:
           path: gitops
 
       - name: Install yq
-        run: sudo snap install yq  # hoặc dùng mikefarah/yq-action nếu runner không có snap
+        run: command -v yq >/dev/null 2>&1 || brew install yq
 
       - name: Bump image tag + push với retry
         working-directory: gitops
