@@ -131,6 +131,7 @@ jobs:
           
           push_success=false
           for i in 1 2 3 4 5; do
+            yq -i '.image.repository = "'"${{ env.ECR_REPO_URI }}"'"' "$VALUES_FILE"
             yq -i '.image.tag = "'"${{ env.IMAGE_TAG }}"'"' "$VALUES_FILE"
             git add "$VALUES_FILE"
             git commit -m "chore(${{ inputs.image_name }}): deploy ${{ env.IMAGE_TAG }} to ${{ inputs.environment }}" || echo "Không có thay đổi để commit, bỏ qua"
