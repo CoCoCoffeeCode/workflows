@@ -29,10 +29,6 @@ on:
       environment:
         required: true
         type: string
-      gitops_app_name:
-        required: false
-        type: string
-        default: ""   # tên thư mục app trong gitops-manifests (apps/<tên>/), mặc định = image_name nếu để trống
     secrets:
       GITOPS_REPO_TOKEN:
         required: false   # PAT/deploy key có quyền write vào repo gitops-manifests
@@ -125,7 +121,7 @@ jobs:
       - name: Bump image tag + push với retry
         working-directory: gitops
         run: |
-          VALUES_FILE="apps/${{ inputs.gitops_app_name || inputs.image_name }}/${{ inputs.environment }}/values.yaml"
+          VALUES_FILE="apps/${{ inputs.image_name }}/${{ inputs.environment }}/values.yaml"
           git config user.name "coco-ci-bot"
           git config user.email "ci-bot@coco.vn"
           
