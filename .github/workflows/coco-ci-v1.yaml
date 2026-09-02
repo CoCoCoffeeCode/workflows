@@ -124,7 +124,7 @@ jobs:
           path: gitops
 
       - name: Install yq
-        run: command -v yq >/dev/null 2>&1 || brew install yq
+        run: command -v yq >/dev/null 2>&1 || arch -arm64 brew install yq
 
       - name: Bump image tag + push với retry
         working-directory: gitops
