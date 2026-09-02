@@ -39,7 +39,6 @@ env:
   AWS_ACCESS_KEY_ID: test
   AWS_SECRET_ACCESS_KEY: test
 
-  IMAGE_TAG: ${{ github.sha }}
   ECR_REPO_URI: ${{ inputs.registry }}/${{ inputs.image_name }}
 
 jobs:
@@ -72,12 +71,15 @@ jobs:
 
   # ---------------------------------------------------------------------------------
   # 2. BUILD IMAGE (Jib) & PUSH LÊN ECR — chỉ chạy khi push vào main
+  #    Tag image dạng <branch>-<short-sha> để dễ đối chiếu trên ArgoCD UI
   # ---------------------------------------------------------------------------------
   build-and-push-image:
     name: Build Image with Jib & Push to ECR
     if: ${{ github.event_name == 'push' }}
     needs: build-and-test
     runs-on: self-hosted
+    outputs:
+      image_tag: ${{ steps.compute-tag.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -87,12 +89,22 @@ jobs:
           distribution: temurin
           java-version: "25"
 
+      - name: Compute image tag (branch-sha)
+        id: compute-tag
+        run: |
+          # thay "/" trong tên nhánh bằng "-" vì Docker tag không cho phép "/"
+          BRANCH_NAME=$(echo "${GITHUB_REF_NAME}" | tr '/' '-')
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          echo "image_tag=${BRANCH_NAME}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
       - name: Login vào Floci ECR
         run: |
           aws ecr get-login-password | docker login --username AWS --password-stdin \
           ${{ inputs.registry }}
 
       - name: Build & Push image via Jib
+        env:
+          IMAGE_TAG: ${{ steps.compute-tag.outputs.image_tag }}
         run: |
           ./gradlew jib \
             -Djib.to.image=${{ env.ECR_REPO_URI }}:${{ env.IMAGE_TAG }} \
@@ -107,6 +119,8 @@ jobs:
     if: ${{ github.event_name == 'push' }}
     needs: build-and-push-image
     runs-on: self-hosted
+    env:
+      IMAGE_TAG: ${{ needs.build-and-push-image.outputs.image_tag }}
     steps:
       - name: Checkout GitOps repo (chứa Helm chart / values)
         uses: actions/checkout@v4
